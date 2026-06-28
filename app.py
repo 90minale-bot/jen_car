@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -258,9 +258,9 @@ def build_report_markdown(df: pd.DataFrame) -> str:
                 f"- Location: {clean_text(row.get('city'))}, {clean_text(row.get('state'))}",
                 f"- VIN: {clean_text(row.get('vin'))}",
                 f"- Dealer listing: {clean_text(row.get('url')) or 'Not provided by Auto.dev'}",
-                f"- Find listing search: {clean_text(row.get('search_url'))}",
                 f"- Carfax: {clean_text(row.get('carfax_url'))}",
                 f"- Auto.dev source: {clean_text(row.get('source_url'))}",
+                f"- Dealer URL candidates: {clean_text(row.get('dealer_url_candidates')) or 'None found'}",
                 "",
             ]
         )
@@ -411,7 +411,7 @@ def collect_url_candidates(value: Any, path: list[str] | None = None) -> list[tu
     return candidates
 
 
-def best_dealer_listing_url(row: dict[str, Any], vin: str) -> str:
+def dealer_listing_url_candidates(row: dict[str, Any], vin: str) -> list[str]:
     ranked: list[tuple[int, str]] = []
     for url, path in collect_url_candidates(row):
         score = listing_url_score(url, path, vin)
@@ -419,17 +419,21 @@ def best_dealer_listing_url(row: dict[str, Any], vin: str) -> str:
             ranked.append((score, url))
 
     if not ranked:
-        return ""
+        return []
 
     ranked.sort(reverse=True)
-    return ranked[0][1]
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for _, url in ranked:
+        if url not in seen:
+            candidates.append(url)
+            seen.add(url)
+    return candidates
 
 
-def search_url_for_listing(*values: Any) -> str:
-    query = " ".join(clean_text(value) for value in values if clean_text(value))
-    if not query:
-        return ""
-    return f"https://www.google.com/search?q={quote_plus(query)}"
+def best_dealer_listing_url(row: dict[str, Any], vin: str) -> str:
+    candidates = dealer_listing_url_candidates(row, vin)
+    return candidates[0] if candidates else ""
 
 
 def infer_fuel_type_from_text(*values: Any) -> str:
@@ -659,8 +663,8 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         carfax_url_from_vin(vin),
     )
     dealer_name = first_non_empty(retail.get("dealer"), row.get("dealer"))
-    buyer_search_url = search_url_for_listing(vin, title, dealer_name, city, state)
-    listing_url = best_dealer_listing_url(row, vin)
+    listing_url_candidates = dealer_listing_url_candidates(row, vin)
+    listing_url = listing_url_candidates[0] if listing_url_candidates else ""
 
     item = {
         "title": title,
@@ -690,8 +694,8 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         "vin": vin,
         "stock_no": first_non_empty(retail.get("stockNumber"), row.get("stock_no")),
         "url": listing_url,
-        "search_url": buyer_search_url,
         "source_url": clean_text(raw_listing_url),
+        "dealer_url_candidates": " | ".join(listing_url_candidates[:5]),
         "carfax_url": carfax_url,
         "dom": safe_num(first_non_empty(retail.get("daysOnMarket"), row.get("dom"))),
         "car_type": row.get("car_type"),
@@ -920,8 +924,7 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         "carfax": "carfax_url",
         "carfax_report": "carfax_url",
         "carfax_link": "carfax_url",
-        "find_listing": "search_url",
-        "search_url": "search_url",
+        "dealer_url_candidates": "dealer_url_candidates",
     }
 
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
@@ -950,7 +953,7 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         df["score"] = [score_vehicle(r) for r in records]
 
     if "title" not in df.columns:
-        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "search_url", "carfax_url", "drivetrain", "fuel_type", "powertrain_type"]:
+        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "carfax_url", "drivetrain", "fuel_type", "powertrain_type"]:
             if col not in df.columns:
                 df[col] = ""
 
@@ -978,19 +981,10 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
     if "source_url" not in df.columns:
         df["source_url"] = df["url"]
 
-    if "search_url" not in df.columns:
-        df["search_url"] = df.apply(
-            lambda row: search_url_for_listing(
-                row.get("vin"),
-                row.get("title"),
-                row.get("dealer"),
-                row.get("city"),
-                row.get("state"),
-            ),
-            axis=1,
-        )
-
     df["url"] = df["url"].apply(lambda value: clean_text(value) if is_usable_listing_url(value) else "")
+
+    if "dealer_url_candidates" not in df.columns:
+        df["dealer_url_candidates"] = df["url"]
 
     return df
 
@@ -1123,7 +1117,6 @@ def show_results(df: pd.DataFrame) -> None:
         "state",
         "vin",
         "url",
-        "search_url",
         "carfax_url",
     ]
 
@@ -1152,7 +1145,6 @@ def show_results(df: pd.DataFrame) -> None:
             "state": "State",
             "vin": "VIN",
             "url": "Dealer Listing",
-            "search_url": "Find Listing",
             "carfax_url": "Carfax",
         }
     )
@@ -1176,7 +1168,6 @@ def show_results(df: pd.DataFrame) -> None:
         hide_index=True,
         column_config={
             "Dealer Listing": st.column_config.LinkColumn("Dealer Listing"),
-            "Find Listing": st.column_config.LinkColumn("Find Listing"),
             "Carfax": st.column_config.LinkColumn("Carfax"),
         },
     )
@@ -1184,7 +1175,7 @@ def show_results(df: pd.DataFrame) -> None:
     if "url" in filtered.columns and not filtered["url"].fillna("").astype(str).str.startswith(("http://", "https://")).any():
         st.info(
             "Auto.dev did not include direct dealer listing URLs in these rows. "
-            "Use Find Listing or the VIN to locate the dealer page."
+            "Use the VIN on the dealer's website, or check Debug: data preview to confirm whether any URL fields were returned."
         )
 
     if not filtered.empty:
@@ -1202,8 +1193,6 @@ def show_results(df: pd.DataFrame) -> None:
             st.write(f"**VIN:** `{best.get('vin', '')}`")
             if str(best.get("url", "")).startswith("http"):
                 st.link_button("Open Dealer Listing", best.get("url"))
-            if str(best.get("search_url", "")).startswith("http"):
-                st.link_button("Find Listing", best.get("search_url"))
             if str(best.get("carfax_url", "")).startswith("http"):
                 st.link_button("Open Carfax", best.get("carfax_url"))
 

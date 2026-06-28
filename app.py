@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 import pandas as pd
 import requests
@@ -256,8 +257,9 @@ def build_report_markdown(df: pd.DataFrame) -> str:
                 f"- Dealer: {clean_text(row.get('dealer'))}",
                 f"- Location: {clean_text(row.get('city'))}, {clean_text(row.get('state'))}",
                 f"- VIN: {clean_text(row.get('vin'))}",
-                f"- Listing: {clean_text(row.get('url'))}",
+                f"- Dealer/search link: {clean_text(row.get('url'))}",
                 f"- Carfax: {clean_text(row.get('carfax_url'))}",
+                f"- Auto.dev source: {clean_text(row.get('source_url'))}",
                 "",
             ]
         )
@@ -314,6 +316,28 @@ def carfax_url_from_vin(vin: Any) -> str:
     if not vin_text:
         return ""
     return f"https://www.carfax.com/VehicleHistory/p/Report.cfx?partner=DVW_1&vin={vin_text}"
+
+
+def is_provider_listing_url(value: Any) -> bool:
+    url = clean_text(value).lower()
+    if not url.startswith(("http://", "https://")):
+        return False
+
+    host = urlparse(url).netloc.lower()
+    provider_hosts = [
+        "details.vast.com",
+        "vast.com",
+        "api.auto.dev",
+        "auto.dev",
+    ]
+    return any(host == provider or host.endswith(f".{provider}") for provider in provider_hosts)
+
+
+def search_url_for_listing(*values: Any) -> str:
+    query = " ".join(clean_text(value) for value in values if clean_text(value))
+    if not query:
+        return ""
+    return f"https://www.google.com/search?q={quote_plus(query)}"
 
 
 def infer_fuel_type_from_text(*values: Any) -> str:
@@ -485,7 +509,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         if x
     )
 
-    listing_url = (
+    raw_listing_url = (
         retail.get("vdp")
         or retail.get("url")
         or row.get("vdp")
@@ -542,6 +566,11 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         retail.get("carfax_url"),
         carfax_url_from_vin(vin),
     )
+    dealer_name = first_non_empty(retail.get("dealer"), row.get("dealer"))
+    buyer_search_url = search_url_for_listing(vin, title, dealer_name, city, state)
+    listing_url = buyer_search_url if is_provider_listing_url(raw_listing_url) else clean_text(raw_listing_url)
+    if not listing_url:
+        listing_url = buyer_search_url
 
     item = {
         "title": title,
@@ -565,12 +594,13 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         "transmission": first_non_empty(vehicle.get("transmission"), row.get("transmission")),
         "exterior_color": first_non_empty(retail.get("exteriorColor"), row.get("exterior_color")),
         "interior_color": first_non_empty(retail.get("interiorColor"), row.get("interior_color")),
-        "dealer": first_non_empty(retail.get("dealer"), row.get("dealer")),
+        "dealer": dealer_name,
         "city": city,
         "state": state,
         "vin": vin,
         "stock_no": first_non_empty(retail.get("stockNumber"), row.get("stock_no")),
         "url": listing_url,
+        "source_url": clean_text(raw_listing_url),
         "carfax_url": carfax_url,
         "dom": safe_num(first_non_empty(retail.get("daysOnMarket"), row.get("dom"))),
         "car_type": row.get("car_type"),
@@ -772,6 +802,7 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         "listing_url": "url",
         "vdp_url": "url",
         "vehicle_url": "url",
+        "source_url": "source_url",
         "dealer_name": "dealer",
         "seller_name": "dealer",
         "dealer_city": "city",
@@ -847,6 +878,24 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
             ),
             axis=1,
         )
+
+    if "url" in df.columns:
+        if "source_url" not in df.columns:
+            df["source_url"] = df["url"]
+
+        def usable_uploaded_url(row: pd.Series) -> str:
+            existing_url = clean_text(row.get("url"))
+            if existing_url and not is_provider_listing_url(existing_url):
+                return existing_url
+            return search_url_for_listing(
+                row.get("vin"),
+                row.get("title"),
+                row.get("dealer"),
+                row.get("city"),
+                row.get("state"),
+            )
+
+        df["url"] = df.apply(usable_uploaded_url, axis=1)
 
     return df
 
@@ -1006,7 +1055,7 @@ def show_results(df: pd.DataFrame) -> None:
             "city": "City",
             "state": "State",
             "vin": "VIN",
-            "url": "Listing",
+            "url": "Dealer/Search Link",
             "carfax_url": "Carfax",
         }
     )
@@ -1029,7 +1078,7 @@ def show_results(df: pd.DataFrame) -> None:
         width="stretch",
         hide_index=True,
         column_config={
-            "Listing": st.column_config.LinkColumn("Listing"),
+            "Dealer/Search Link": st.column_config.LinkColumn("Dealer/Search Link"),
             "Carfax": st.column_config.LinkColumn("Carfax"),
         },
     )
@@ -1048,7 +1097,7 @@ def show_results(df: pd.DataFrame) -> None:
             st.write(f"**Distance:** {distance_label(best.get('distance_miles'), include_units=True)}")
             st.write(f"**VIN:** `{best.get('vin', '')}`")
             if str(best.get("url", "")).startswith("http"):
-                st.link_button("Open Listing", best.get("url"))
+                st.link_button("Open Dealer/Search Link", best.get("url"))
             if str(best.get("carfax_url", "")).startswith("http"):
                 st.link_button("Open Carfax", best.get("carfax_url"))
 
@@ -1148,8 +1197,8 @@ def main() -> None:
     with st.sidebar:
         st.header("Search Auto.dev")
 
-        make = st.text_input("Make", value="Infiniti")
-        model = st.text_input("Model", value="QX60")
+        make = st.text_input("Make", value="Toyota")
+        model = st.text_input("Model", value="RAV4")
         zip_code = st.text_input("ZIP code", value="60004")
         radius = st.number_input(
             "Radius miles",

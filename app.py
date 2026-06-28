@@ -127,9 +127,41 @@ def build_autodev_params(
     elif selected_type in {"used", "certified"}:
         params["retailListing.used"] = "true"
         if selected_type == "certified":
-            params["retailListing.certified"] = "true"
+            params["retailListing.cpo"] = "true"
 
     return params
+
+
+def extract_autodev_listings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Auto.dev returns listings in data, but keep fallbacks for compatible payloads."""
+    candidates = [
+        payload.get("data"),
+        payload.get("records"),
+        payload.get("results"),
+        payload.get("listings"),
+    ]
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend([
+            data.get("records"),
+            data.get("results"),
+            data.get("listings"),
+            data.get("items"),
+        ])
+
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+
+    return []
+
+
+def autodev_total(payload: dict[str, Any]) -> Any:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return first_non_empty(data.get("total"), data.get("count"), payload.get("total"), payload.get("count"))
+    return first_non_empty(payload.get("total"), payload.get("count"))
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -169,14 +201,16 @@ def autodev_search(
             }
 
         last_response = payload
+        last_response["_request_params"] = {k: v for k, v in page_params.items() if k != "api_key"}
+        last_response["_page"] = page + 1
 
         if response.status_code != 200:
             raise RuntimeError(
                 f"Auto.dev API returned HTTP {response.status_code}: {payload}"
             )
 
-        listings = payload.get("data", [])
-        if not isinstance(listings, list) or not listings:
+        listings = extract_autodev_listings(payload)
+        if not listings:
             break
 
         all_listings.extend(listings)
@@ -1081,8 +1115,11 @@ def main() -> None:
                         max_pages=int(max_pages),
                     )
 
+                    raw_listing_count = len(listings)
+                    filter_counts: list[tuple[str, int]] = [("Auto.dev raw listings", raw_listing_count)]
                     records = [extract_listing(x) for x in listings]
                     df = pd.DataFrame(records)
+                    filter_counts.append(("Normalized rows", len(df)))
 
                     # Enforce filters locally too.
                     # This fixes cases where the API returns rows above max mileage/price
@@ -1094,18 +1131,23 @@ def main() -> None:
 
                         if "price" in df.columns:
                             df = df[df["price"].fillna(10**12) <= int(max_price)]
+                            filter_counts.append(("After max price", len(df)))
 
                         if "mileage" in df.columns:
                             df = df[df["mileage"].fillna(10**12) <= int(max_miles)]
+                            filter_counts.append(("After max miles", len(df)))
 
                         if "year" in df.columns:
                             df = df[df["year"].fillna(0) >= int(min_year)]
+                            filter_counts.append(("After min year", len(df)))
 
                         if "distance_miles" in df.columns:
                             df = df[df["distance_miles"].fillna(10**12) <= int(radius)]
+                            filter_counts.append(("After distance", len(df)))
 
                         before_fuel_filter_count = len(df)
                         df = filter_by_fuel_type(df, fuel_filter)
+                        filter_counts.append(("After fuel filter", len(df)))
 
                         if fuel_filter.lower() == "hybrid" and before_fuel_filter_count > 0 and df.empty:
                             st.warning(
@@ -1124,11 +1166,20 @@ def main() -> None:
                             .str.contains("awd|4wd|all wheel|four wheel", regex=True)
                         )
                         df = df[mask]
+                        filter_counts.append(("After AWD / 4WD only", len(df)))
 
                     st.session_state["results_df"] = df
 
                     if df.empty:
-                        st.warning("No listings returned. Try widening your filters.")
+                        total_text = autodev_total(raw_response)
+                        if raw_listing_count:
+                            st.warning("Auto.dev returned listings, but local filters removed them.")
+                        else:
+                            st.warning("Auto.dev returned no listings for this request. Try widening make/model/year/price/mileage/radius.")
+                        if total_text not in (None, ""):
+                            st.caption(f"Auto.dev reported total/count: {total_text}")
+                        with st.expander("Filter diagnostics"):
+                            st.table(pd.DataFrame(filter_counts, columns=["Step", "Rows"]))
                         with st.expander("Raw Auto.dev response"):
                             st.json(raw_response)
                     else:

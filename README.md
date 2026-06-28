@@ -13,6 +13,7 @@ The app is designed around limited monthly API quotas: search once, cache the re
 - CSV upload mode for reviewing saved or manually collected listings without using API calls
 - One-click CSV export and markdown buyer report export
 - One-hour Streamlit cache for repeated identical searches
+- Filter diagnostics when Auto.dev returns no rows or local filters remove every listing
 
 ## Run Locally
 

@@ -10,3 +10,8 @@
 - Kept CSV upload mode for no-API review workflows
 - Archived historical dashboard versions under `archive/`
 - Updated documentation and devcontainer startup to use `app.py`
+
+## Follow-up fixes
+
+- Added Auto.dev response parsing fallbacks and filter diagnostics for zero-result searches
+- Corrected certified-search parameter to use `retailListing.cpo`

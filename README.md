@@ -1,12 +1,12 @@
 # Car Deal Report Dashboard
 
-A Streamlit dashboard for building a ranked used-car shortlist from MarketCheck listings.
+A Streamlit dashboard for building a ranked used-car shortlist from Auto.dev listings.
 
 The app is designed around limited monthly API quotas: search once, cache the result, filter locally, and export a buyer-ready report.
 
 ## Features
 
-- Search MarketCheck by make, model, ZIP, radius, year, price, mileage, car type, and fuel type
+- Search Auto.dev by make, model, ZIP, radius, year, price, mileage, car type, and fuel type
 - Hybrid-friendly filtering that checks fuel, trim, title, engine, and powertrain text
 - Local filtering after the API call so returned rows still respect price, mileage, year, distance, and AWD preferences
 - 0-100 vehicle scoring based on market gap, mileage, distance, age, and fuel preference
@@ -23,16 +23,16 @@ streamlit run app.py
 
 ## API Key
 
-Set your MarketCheck key in one of these places:
+Create an API key at https://www.auto.dev/dashboard/api-keys, then set it in one of these places:
 
 ```bash
-MARKETCHECK_API_KEY=your_key_here
+AUTODEV_API_KEY=your_key_here
 ```
 
 Or in Streamlit Cloud secrets:
 
 ```toml
-MARKETCHECK_API_KEY = "your_key_here"
+AUTODEV_API_KEY = "your_key_here"
 ```
 
 The app still works without an API key when you upload a CSV.
@@ -45,7 +45,7 @@ The app still works without an API key when you upload a CSV.
 4. Download the buyer report or CSV.
 5. Increase pages only when a paid or high-intent report needs deeper coverage.
 
-Each MarketCheck page is one API call. The sidebar shows the maximum call count before you build a report.
+Each Auto.dev page is one API call. The sidebar shows the maximum call count before you build a report.
 
 ## Release Structure
 

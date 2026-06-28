@@ -3,7 +3,8 @@
 ## v1.0 - Car Deal Report Dashboard
 
 - Promoted the latest fixed dashboard into `app.py`
-- Added quota-friendly defaults and visible MarketCheck call estimates
+- Switched the release app to Auto.dev using `AUTODEV_API_KEY`
+- Added quota-friendly defaults and visible Auto.dev call estimates
 - Added one-hour caching for repeated identical searches
 - Added markdown buyer report export
 - Kept CSV upload mode for no-API review workflows

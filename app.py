@@ -1,15 +1,15 @@
 # app.py
 # Car Deal Report Dashboard
-# Release baseline: MarketCheck search, ranked results, CSV upload, and report export.
+# Release baseline: Auto.dev search, ranked results, CSV upload, and report export.
 #
 # Run locally:
 #   streamlit run app.py
 #
 # Streamlit Cloud secrets:
-#   MARKETCHECK_API_KEY = "your_key_here"
+#   AUTODEV_API_KEY = "your_key_here"
 #
 # Local .env option:
-#   MARKETCHECK_API_KEY=your_key_here
+#   AUTODEV_API_KEY=your_key_here
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ st.set_page_config(
 
 
 BASE_DIR = Path(__file__).resolve().parent
-MARKETCHECK_ENDPOINT = "https://api.marketcheck.com/v2/search/car/active"
+AUTODEV_ENDPOINT = "https://api.auto.dev/listings"
 DEFAULT_ROWS_PER_PAGE = 50
 DEFAULT_MAX_PAGES = 2
 MAX_ALLOWED_PAGES = 5
@@ -40,14 +40,19 @@ MAX_ALLOWED_PAGES = 5
 # API / config helpers
 # ------------------------------------------------------------
 def get_api_key() -> str:
-    try:
-        key = st.secrets.get("MARKETCHECK_API_KEY", "")
+    for name in ("AUTODEV_API_KEY", "AUTO_DEV_API_KEY"):
+        try:
+            key = st.secrets.get(name, "")
+            if key:
+                return str(key)
+        except Exception:
+            pass
+
+        key = os.getenv(name, "")
         if key:
             return str(key)
-    except Exception:
-        pass
 
-    return os.getenv("MARKETCHECK_API_KEY", "")
+    return ""
 
 
 def clean_text(value: Any) -> str:
@@ -84,10 +89,9 @@ def number(value: Any) -> str:
 
 
 # ------------------------------------------------------------
-# MarketCheck API
+# Auto.dev API
 # ------------------------------------------------------------
-def build_marketcheck_params(
-    api_key: str,
+def build_autodev_params(
     make: str,
     model: str,
     zip_code: str,
@@ -99,63 +103,60 @@ def build_marketcheck_params(
     car_type: str,
     fuel_filter: str = "Any",
 ) -> dict[str, Any]:
+    safe_radius = max(10, min(int(radius), 100))
+    safe_rows = max(1, min(int(rows), 100))
+
     params: dict[str, Any] = {
-        "api_key": api_key,
-        "make": make,
-        "model": model,
+        "page": 1,
+        "limit": safe_rows,
+        "sort": "updatedAt.desc",
+        "vehicle.make": make,
+        "vehicle.model": model,
+        "vehicle.year": f"{int(min_year)}-2030",
+        "retailListing.price": f"1-{int(max_price)}",
+        "retailListing.miles": f"0-{int(max_miles)}",
         "zip": zip_code,
-        "radius": radius,
-        "year_min": min_year,
-        "price_max": max_price,
-        # MarketCheck commonly supports miles_max, but some examples/accounts use mileage_max.
-        # Send both so the API has the best chance of applying the filter.
-        "miles_max": max_miles,
-        "mileage_max": max_miles,
-        "rows": rows,
-        "start": 0,
+        "distance": safe_radius,
+        "includeUnpriced": "false",
+        "includes": "total",
     }
 
-    if car_type and car_type.lower() != "any":
-        params["car_type"] = car_type.lower()
-
-    # MarketCheck supports a fuel_type vehicle-spec filter, but hybrid records are
-    # inconsistent across dealer feeds. Some hybrids come back as "Hybrid",
-    # some as "Electric / Unleaded", and some Toyota hybrids may only show
-    # "Unleaded" while the trim/title says Hybrid.
-    #
-    # IMPORTANT: Do not send an API-level fuel_type filter for Hybrid. Pull the
-    # broader result set first, then filter locally with is_hybrid_record().
-    # This avoids accidentally filtering out true hybrids before we can inspect
-    # trim/title/engine/powertrain text.
-    if fuel_filter and fuel_filter.lower() != "any" and fuel_filter.lower() != "hybrid":
-        fuel_lookup = {
-            "gasoline": "Unleaded,Gasoline,Premium Unleaded",
-            "diesel": "Diesel",
-            "electric": "Electric",
-            "premium unleaded": "Premium Unleaded",
-            "electric / unleaded": "Electric / Unleaded",
-        }
-        params["fuel_type"] = fuel_lookup.get(fuel_filter.lower(), fuel_filter)
+    selected_type = car_type.lower() if car_type else "used"
+    if selected_type == "new":
+        params["retailListing.used"] = "false"
+    elif selected_type in {"used", "certified"}:
+        params["retailListing.used"] = "true"
+        if selected_type == "certified":
+            params["retailListing.certified"] = "true"
 
     return params
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
-def marketcheck_search(params: dict[str, Any], max_pages: int = DEFAULT_MAX_PAGES) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def autodev_search(
+    params: dict[str, Any],
+    _api_key: str,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_listings: list[dict[str, Any]] = []
     last_response: dict[str, Any] = {}
 
-    rows = int(params.get("rows", 50))
-    rows = max(1, min(rows, 50))
+    limit = int(params.get("limit", DEFAULT_ROWS_PER_PAGE))
+    limit = max(1, min(limit, 100))
+    headers = {
+        "Authorization": f"Bearer {_api_key}",
+        "Content-Type": "application/json",
+    }
 
     for page in range(max_pages):
         page_params = params.copy()
-        page_params["rows"] = rows
-        page_params["start"] = page * rows
+        page_params["limit"] = limit
+        page_params["page"] = page + 1
 
         response = requests.get(
-            MARKETCHECK_ENDPOINT,
+            AUTODEV_ENDPOINT,
             params=page_params,
+            headers=headers,
             timeout=30,
         )
 
@@ -171,24 +172,24 @@ def marketcheck_search(params: dict[str, Any], max_pages: int = DEFAULT_MAX_PAGE
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"MarketCheck API returned HTTP {response.status_code}: {payload}"
+                f"Auto.dev API returned HTTP {response.status_code}: {payload}"
             )
 
-        listings = payload.get("listings", [])
-        if not listings:
+        listings = payload.get("data", [])
+        if not isinstance(listings, list) or not listings:
             break
 
         all_listings.extend(listings)
 
         # Stop if we received fewer than requested, meaning likely last page.
-        if len(listings) < rows:
+        if len(listings) < limit:
             break
 
     return all_listings, last_response
 
 
 def estimated_api_calls(max_pages: int) -> int:
-    """MarketCheck pagination uses one API request per page."""
+    """Auto.dev pagination uses one API request per page."""
     return max(1, int(max_pages))
 
 
@@ -263,7 +264,7 @@ def first_non_empty(*values: Any) -> str:
 
 def extract_fuel_type(row: dict[str, Any], build: dict[str, Any]) -> str:
     """
-    MarketCheck vehicle specs use fuel_type.
+    Auto.dev vehicle specs may include fuel_type or similar fuel fields.
 
     In practice, the value may appear under build.fuel_type, row.fuel_type,
     specs.fuel_type, or inventory.fuel_type depending on endpoint/account.
@@ -295,9 +296,9 @@ def fuel_search_text_from_record(record: dict[str, Any]) -> str:
 
 def is_hybrid_record(record: dict[str, Any]) -> bool:
     """
-    Identify hybrids using all fields we can get from MarketCheck/dealer feeds.
+    Identify hybrids using all fields we can get from Auto.dev/dealer feeds.
 
-    MarketCheck supports fuel_type, but hybrid inventory is not always labeled
+    Auto.dev inventory is not always labeled
     with the literal word "Hybrid". Common values include:
       - Hybrid
       - Plug-In Hybrid / PHEV / HEV
@@ -346,29 +347,31 @@ def filter_by_fuel_type(df: pd.DataFrame, fuel_filter: str) -> pd.DataFrame:
 
 
 def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
-    build = row.get("build") or {}
-    dealer = row.get("dealer") or {}
+    vehicle = row.get("vehicle") if isinstance(row.get("vehicle"), dict) else {}
+    retail = row.get("retailListing") if isinstance(row.get("retailListing"), dict) else {}
+    history = row.get("history") if isinstance(row.get("history"), dict) else {}
 
-    price = safe_num(row.get("price"))
+    price = safe_num(first_non_empty(retail.get("price"), row.get("price")))
 
-    # MarketCheck may return mileage as miles, mileage, or odometer depending on endpoint/account.
+    # Auto.dev normally returns mileage under retailListing.miles, but keep fallbacks for CSV/imported rows.
     mileage = (
-        safe_num(row.get("miles"))
+        safe_num(retail.get("miles"))
+        or safe_num(row.get("miles"))
         or safe_num(row.get("mileage"))
         or safe_num(row.get("odometer"))
-        or safe_num(get_nested(row, ["inventory", "miles"]))
-        or safe_num(get_nested(row, ["inventory", "mileage"]))
     )
 
     market_value = (
-        safe_num(row.get("market_value"))
-        or safe_num(row.get("predicted_price"))
-        or safe_num(row.get("predicted_market_price"))
+        safe_num(row.get("marketValue"))
+        or safe_num(row.get("market_value"))
+        or safe_num(retail.get("marketValue"))
+        or safe_num(get_nested(row, ["pricing", "marketValue"]))
+        or safe_num(get_nested(row, ["valuation", "marketValue"]))
     )
 
     if market_value is None:
         market_value = estimate_fmv_fallback(
-            year=safe_num(build.get("year")),
+            year=safe_num(first_non_empty(vehicle.get("year"), row.get("year"))),
             price=price,
             mileage=mileage,
         )
@@ -377,55 +380,59 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
     if market_value is not None and price is not None:
         market_discount = market_value - price
 
-    city = clean_text(dealer.get("city"))
-    state = clean_text(dealer.get("state"))
+    city = clean_text(first_non_empty(retail.get("city"), row.get("city")))
+    state = clean_text(first_non_empty(retail.get("state"), row.get("state")))
 
     title = " ".join(
         x for x in [
-            clean_text(build.get("year")),
-            clean_text(build.get("make")),
-            clean_text(build.get("model")),
-            clean_text(build.get("trim")),
+            clean_text(first_non_empty(vehicle.get("year"), row.get("year"))),
+            clean_text(first_non_empty(vehicle.get("make"), row.get("make"))),
+            clean_text(first_non_empty(vehicle.get("model"), row.get("model"))),
+            clean_text(first_non_empty(vehicle.get("trim"), row.get("trim"))),
         ]
         if x
     )
 
     listing_url = (
-        row.get("vdp_url")
-        or row.get("listing_url")
+        retail.get("vdp")
+        or retail.get("url")
+        or row.get("vdp")
         or row.get("url")
+        or row.get("@id")
         or ""
     )
 
     item = {
         "title": title,
-        "year": safe_num(build.get("year")),
-        "make": build.get("make"),
-        "model": build.get("model"),
-        "trim": build.get("trim"),
+        "year": safe_num(first_non_empty(vehicle.get("year"), row.get("year"))),
+        "make": first_non_empty(vehicle.get("make"), row.get("make")),
+        "model": first_non_empty(vehicle.get("model"), row.get("model")),
+        "trim": first_non_empty(vehicle.get("trim"), row.get("trim")),
         "price": price,
         "market_value": market_value,
         "market_discount": market_discount,
         "market_comparison": market_comparison(market_discount),
         "deal_rating": deal_rating(market_discount),
         "mileage": mileage,
-        "distance_miles": safe_num(row.get("dist")),
-        "drivetrain": build.get("drivetrain"),
-        "body_type": build.get("body_type"),
-        "fuel_type": extract_fuel_type(row, build),
-        "powertrain_type": first_non_empty(build.get("powertrain_type"), row.get("powertrain_type")),
-        "engine": build.get("engine"),
-        "transmission": build.get("transmission"),
-        "exterior_color": row.get("exterior_color"),
-        "interior_color": row.get("interior_color"),
-        "dealer": dealer.get("name"),
+        "distance_miles": safe_num(first_non_empty(retail.get("distance"), row.get("distance"), row.get("dist"))),
+        "drivetrain": first_non_empty(vehicle.get("drivetrain"), vehicle.get("driveTrain"), row.get("drivetrain")),
+        "body_type": first_non_empty(vehicle.get("bodyType"), vehicle.get("body_type"), row.get("body_type")),
+        "fuel_type": extract_fuel_type(row, vehicle),
+        "powertrain_type": first_non_empty(vehicle.get("powertrainType"), vehicle.get("powertrain_type"), row.get("powertrain_type")),
+        "engine": first_non_empty(vehicle.get("engine"), row.get("engine")),
+        "transmission": first_non_empty(vehicle.get("transmission"), row.get("transmission")),
+        "exterior_color": first_non_empty(retail.get("exteriorColor"), row.get("exterior_color")),
+        "interior_color": first_non_empty(retail.get("interiorColor"), row.get("interior_color")),
+        "dealer": first_non_empty(retail.get("dealer"), row.get("dealer")),
         "city": city,
         "state": state,
-        "vin": row.get("vin"),
-        "stock_no": row.get("stock_no"),
+        "vin": first_non_empty(row.get("vin"), vehicle.get("vin")),
+        "stock_no": first_non_empty(retail.get("stockNumber"), row.get("stock_no")),
         "url": listing_url,
-        "dom": safe_num(row.get("dom")),
+        "dom": safe_num(first_non_empty(retail.get("daysOnMarket"), row.get("dom"))),
         "car_type": row.get("car_type"),
+        "one_owner": first_non_empty(row.get("oneOwner"), history.get("oneOwner"), history.get("ownerCount") == 1),
+        "clean_title": first_non_empty(row.get("cleanTitle"), history.get("cleanTitle"), history.get("titleStatus")),
     }
 
     item["score"] = score_vehicle(item)
@@ -433,7 +440,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def estimate_fmv_fallback(year: float | None, price: float | None, mileage: float | None) -> float | None:
-    """Light fallback only when MarketCheck does not return a market value."""
+    """Light fallback only when Auto.dev does not return a market value."""
     if price is None:
         return None
 
@@ -732,7 +739,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
             ("model", "Model"),
             ("trim", "Trim"),
             ("drivetrain", "Drivetrain"),
-            ("fuel_type", "Exact fuel type from MarketCheck"),
+            ("fuel_type", "Exact fuel type from Auto.dev"),
             ("deal_rating", "Deal rating"),
             ("state", "State"),
             ("car_type", "Car type"),
@@ -748,7 +755,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
             hybrid_only = st.checkbox(
                 "Hybrid only",
                 value=False,
-                help="Matches MarketCheck fuel_type values like Hybrid or Electric / Unleaded, plus trim/title text containing hybrid.",
+                help="Matches Auto.dev fuel values like Hybrid or Electric / Unleaded, plus trim/title text containing hybrid.",
             )
             if hybrid_only:
                 filtered = filter_by_fuel_type(filtered, "Hybrid")
@@ -979,7 +986,7 @@ def main() -> None:
     api_key = get_api_key()
 
     with st.sidebar:
-        st.header("Search MarketCheck")
+        st.header("Search Auto.dev")
 
         make = st.text_input("Make", value="Infiniti")
         model = st.text_input("Model", value="QX60")
@@ -990,7 +997,7 @@ def main() -> None:
             max_value=100,
             value=100,
             step=10,
-            help="MarketCheck API maximum search radius is 100 miles.",
+            help="Auto.dev search radius is capped at 100 miles in this app.",
         )
         min_year = st.number_input("Minimum year", min_value=1980, max_value=2030, value=2022, step=1)
         max_price = st.number_input("Maximum price", min_value=0, value=45000, step=1000)
@@ -1001,7 +1008,7 @@ def main() -> None:
             max_value=50,
             value=DEFAULT_ROWS_PER_PAGE,
             step=10,
-            help="MarketCheck commonly caps this at 50 rows per request.",
+            help="Auto.dev listing pages are requested in batches; keep this modest on free tiers.",
         )
         max_pages = st.number_input(
             "Max pages",
@@ -1009,21 +1016,21 @@ def main() -> None:
             max_value=MAX_ALLOWED_PAGES,
             value=DEFAULT_MAX_PAGES,
             step=1,
-            help="Each page is one MarketCheck API call. Keep this low until you know the search is useful.",
+            help="Each page is one Auto.dev API call. Keep this low until you know the search is useful.",
         )
         car_type = st.selectbox("Car type", ["used", "certified", "new", "any"], index=0)
         fuel_filter = st.selectbox(
             "Fuel type",
             ["Any", "Hybrid", "Gasoline", "Diesel", "Electric", "Premium Unleaded", "Electric / Unleaded"],
             index=0,
-            help="Uses MarketCheck fuel_type. Hybrid also matches Electric / Unleaded and trim/title text containing hybrid.",
+            help="Uses Auto.dev fuel fields where available. Hybrid also matches Electric / Unleaded and trim/title text containing hybrid.",
         )
 
         require_awd = st.checkbox("AWD / 4WD only", value=False)
 
         call_estimate = estimated_api_calls(int(max_pages))
         st.info(
-            f"This search will use up to {call_estimate} MarketCheck API call"
+            f"This search will use up to {call_estimate} Auto.dev API call"
             f"{'' if call_estimate == 1 else 's'}. Re-running the same search is cached for 1 hour."
         )
 
@@ -1034,7 +1041,7 @@ def main() -> None:
 
     if not api_key:
         st.warning(
-            "MarketCheck API key is not configured. Add MARKETCHECK_API_KEY in Streamlit secrets "
+            "Auto.dev API key is not configured. Add AUTODEV_API_KEY in Streamlit secrets "
             "or as a local environment variable. You can still upload a CSV."
         )
 
@@ -1048,12 +1055,11 @@ def main() -> None:
 
     if search_clicked:
         if not api_key:
-            st.error("Missing MarketCheck API key.")
+            st.error("Missing Auto.dev API key.")
         elif not make.strip() or not model.strip() or not zip_code.strip():
             st.error("Make, model, and ZIP code are required.")
         else:
-            params = build_marketcheck_params(
-                api_key=api_key,
+            params = build_autodev_params(
                 make=make.strip(),
                 model=model.strip(),
                 zip_code=zip_code.strip(),
@@ -1066,10 +1072,11 @@ def main() -> None:
                 fuel_filter=fuel_filter,
             )
 
-            with st.spinner("Searching MarketCheck..."):
+            with st.spinner("Searching Auto.dev..."):
                 try:
-                    listings, raw_response = marketcheck_search(
+                    listings, raw_response = autodev_search(
                         params=params,
+                        _api_key=api_key,
                         max_pages=int(max_pages),
                     )
 
@@ -1078,7 +1085,7 @@ def main() -> None:
 
                     # Enforce filters locally too.
                     # This fixes cases where the API returns rows above max mileage/price
-                    # or where MarketCheck uses a slightly different parameter name.
+                    # or where Auto.dev/account settings return rows outside requested filters.
                     if not df.empty:
                         for col in ["price", "mileage", "year", "distance_miles"]:
                             if col in df.columns:
@@ -1121,7 +1128,7 @@ def main() -> None:
 
                     if df.empty:
                         st.warning("No listings returned. Try widening your filters.")
-                        with st.expander("Raw MarketCheck response"):
+                        with st.expander("Raw Auto.dev response"):
                             st.json(raw_response)
                     else:
                         st.success(f"Found {len(df)} listings.")

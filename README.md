@@ -14,6 +14,7 @@ The app is designed around limited monthly API quotas: search once, cache the re
 - One-click CSV export and markdown buyer report export
 - One-hour Streamlit cache for repeated identical searches
 - Filter diagnostics when Auto.dev returns no rows or local filters remove every listing
+- Distance filtering keeps listings when Auto.dev does not provide a distance value
 
 ## Run Locally
 

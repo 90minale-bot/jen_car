@@ -436,6 +436,16 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         or ""
     )
 
+    distance = safe_num(first_non_empty(
+        retail.get("distance"),
+        retail.get("distanceMiles"),
+        retail.get("distance_miles"),
+        row.get("distance"),
+        row.get("distanceMiles"),
+        row.get("distance_miles"),
+        row.get("dist"),
+    ))
+
     item = {
         "title": title,
         "year": safe_num(first_non_empty(vehicle.get("year"), row.get("year"))),
@@ -448,7 +458,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         "market_comparison": market_comparison(market_discount),
         "deal_rating": deal_rating(market_discount),
         "mileage": mileage,
-        "distance_miles": safe_num(first_non_empty(retail.get("distance"), row.get("distance"), row.get("dist"))),
+        "distance_miles": distance,
         "drivetrain": first_non_empty(vehicle.get("drivetrain"), vehicle.get("driveTrain"), row.get("drivetrain")),
         "body_type": first_non_empty(vehicle.get("bodyType"), vehicle.get("body_type"), row.get("body_type")),
         "fuel_type": extract_fuel_type(row, vehicle),
@@ -761,7 +771,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         if "distance_miles" in filtered.columns and filtered["distance_miles"].notna().any():
             max_distance_default = int(filtered["distance_miles"].max())
             max_distance = st.number_input("Max distance miles", min_value=0, value=max_distance_default, step=25)
-            filtered = filtered[filtered["distance_miles"].fillna(10**12) <= max_distance]
+            filtered = filtered[filtered["distance_miles"].isna() | (filtered["distance_miles"] <= max_distance)]
 
         if "year" in filtered.columns and filtered["year"].notna().any():
             min_year_default = int(filtered["year"].min())
@@ -1142,8 +1152,12 @@ def main() -> None:
                             filter_counts.append(("After min year", len(df)))
 
                         if "distance_miles" in df.columns:
-                            df = df[df["distance_miles"].fillna(10**12) <= int(radius)]
-                            filter_counts.append(("After distance", len(df)))
+                            known_distance = df["distance_miles"].notna().sum()
+                            if known_distance:
+                                df = df[df["distance_miles"].isna() | (df["distance_miles"] <= int(radius))]
+                                filter_counts.append(("After distance", len(df)))
+                            else:
+                                filter_counts.append(("After distance (not provided by Auto.dev)", len(df)))
 
                         before_fuel_filter_count = len(df)
                         df = filter_by_fuel_type(df, fuel_filter)

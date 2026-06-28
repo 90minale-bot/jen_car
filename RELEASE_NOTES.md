@@ -15,3 +15,4 @@
 
 - Added Auto.dev response parsing fallbacks and filter diagnostics for zero-result searches
 - Corrected certified-search parameter to use `retailListing.cpo`
+- Changed distance filtering so missing Auto.dev distance values do not remove otherwise valid listings

@@ -257,7 +257,8 @@ def build_report_markdown(df: pd.DataFrame) -> str:
                 f"- Dealer: {clean_text(row.get('dealer'))}",
                 f"- Location: {clean_text(row.get('city'))}, {clean_text(row.get('state'))}",
                 f"- VIN: {clean_text(row.get('vin'))}",
-                f"- Dealer/search link: {clean_text(row.get('url'))}",
+                f"- Dealer listing: {clean_text(row.get('url')) or 'Not provided by Auto.dev'}",
+                f"- Find listing search: {clean_text(row.get('search_url'))}",
                 f"- Carfax: {clean_text(row.get('carfax_url'))}",
                 f"- Auto.dev source: {clean_text(row.get('source_url'))}",
                 "",
@@ -338,6 +339,90 @@ def is_usable_listing_url(value: Any) -> bool:
     if not url.startswith(("http://", "https://")):
         return False
     return not is_provider_listing_url(url)
+
+
+def listing_url_score(url: str, path: list[str], vin: str) -> int:
+    """Rank candidate URLs by how likely they are to be a vehicle detail page."""
+    url_text = clean_text(url)
+    if not is_usable_listing_url(url_text):
+        return -1
+
+    lowered_url = url_text.lower()
+    lowered_path = ".".join(path).lower()
+
+    reject_terms = [
+        "carfax",
+        "google.",
+        "facebook.",
+        "instagram.",
+        "youtube.",
+        "youtu.be",
+        "twitter.",
+        "x.com",
+        "maps.google",
+    ]
+    if any(term in lowered_url for term in reject_terms):
+        return -1
+
+    asset_terms = [
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+        ".pdf",
+        "image",
+        "photo",
+        "thumbnail",
+        "logo",
+    ]
+    if any(term in lowered_url or term in lowered_path for term in asset_terms):
+        return -1
+
+    score = 10
+    if vin and vin.lower() in lowered_url:
+        score += 100
+    if any(term in lowered_path for term in ["vdp", "listing", "detail", "vehicle", "inventory"]):
+        score += 70
+    if any(term in lowered_url for term in ["/inventory/", "/vehicle/", "/vehicles/", "/used/", "/new/", "/details/"]):
+        score += 35
+    if "dealer" in lowered_path or "retail" in lowered_path:
+        score += 20
+    if lowered_path.endswith(".url") or lowered_path.endswith(".vdp"):
+        score += 15
+    return score
+
+
+def collect_url_candidates(value: Any, path: list[str] | None = None) -> list[tuple[str, list[str]]]:
+    path = path or []
+    candidates: list[tuple[str, list[str]]] = []
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            candidates.extend(collect_url_candidates(child, [*path, str(key)]))
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            candidates.extend(collect_url_candidates(child, [*path, str(idx)]))
+    else:
+        text = clean_text(value)
+        if text.startswith(("http://", "https://")):
+            candidates.append((text, path))
+
+    return candidates
+
+
+def best_dealer_listing_url(row: dict[str, Any], vin: str) -> str:
+    ranked: list[tuple[int, str]] = []
+    for url, path in collect_url_candidates(row):
+        score = listing_url_score(url, path, vin)
+        if score >= 0:
+            ranked.append((score, url))
+
+    if not ranked:
+        return ""
+
+    ranked.sort(reverse=True)
+    return ranked[0][1]
 
 
 def search_url_for_listing(*values: Any) -> str:
@@ -575,9 +660,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
     )
     dealer_name = first_non_empty(retail.get("dealer"), row.get("dealer"))
     buyer_search_url = search_url_for_listing(vin, title, dealer_name, city, state)
-    listing_url = clean_text(raw_listing_url) if is_usable_listing_url(raw_listing_url) else ""
-    if not listing_url:
-        listing_url = buyer_search_url
+    listing_url = best_dealer_listing_url(row, vin)
 
     item = {
         "title": title,
@@ -607,6 +690,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         "vin": vin,
         "stock_no": first_non_empty(retail.get("stockNumber"), row.get("stock_no")),
         "url": listing_url,
+        "search_url": buyer_search_url,
         "source_url": clean_text(raw_listing_url),
         "carfax_url": carfax_url,
         "dom": safe_num(first_non_empty(retail.get("daysOnMarket"), row.get("dom"))),
@@ -836,6 +920,8 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         "carfax": "carfax_url",
         "carfax_report": "carfax_url",
         "carfax_link": "carfax_url",
+        "find_listing": "search_url",
+        "search_url": "search_url",
     }
 
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
@@ -864,7 +950,7 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         df["score"] = [score_vehicle(r) for r in records]
 
     if "title" not in df.columns:
-        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "carfax_url", "drivetrain", "fuel_type", "powertrain_type"]:
+        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "search_url", "carfax_url", "drivetrain", "fuel_type", "powertrain_type"]:
             if col not in df.columns:
                 df[col] = ""
 
@@ -886,23 +972,25 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
             axis=1,
         )
 
-    if "url" in df.columns:
-        if "source_url" not in df.columns:
-            df["source_url"] = df["url"]
+    if "url" not in df.columns:
+        df["url"] = ""
 
-        def usable_uploaded_url(row: pd.Series) -> str:
-            existing_url = clean_text(row.get("url"))
-            if is_usable_listing_url(existing_url):
-                return existing_url
-            return search_url_for_listing(
+    if "source_url" not in df.columns:
+        df["source_url"] = df["url"]
+
+    if "search_url" not in df.columns:
+        df["search_url"] = df.apply(
+            lambda row: search_url_for_listing(
                 row.get("vin"),
                 row.get("title"),
                 row.get("dealer"),
                 row.get("city"),
                 row.get("state"),
-            )
+            ),
+            axis=1,
+        )
 
-        df["url"] = df.apply(usable_uploaded_url, axis=1)
+    df["url"] = df["url"].apply(lambda value: clean_text(value) if is_usable_listing_url(value) else "")
 
     return df
 
@@ -1035,6 +1123,7 @@ def show_results(df: pd.DataFrame) -> None:
         "state",
         "vin",
         "url",
+        "search_url",
         "carfax_url",
     ]
 
@@ -1062,7 +1151,8 @@ def show_results(df: pd.DataFrame) -> None:
             "city": "City",
             "state": "State",
             "vin": "VIN",
-            "url": "Dealer/Search Link",
+            "url": "Dealer Listing",
+            "search_url": "Find Listing",
             "carfax_url": "Carfax",
         }
     )
@@ -1085,10 +1175,17 @@ def show_results(df: pd.DataFrame) -> None:
         width="stretch",
         hide_index=True,
         column_config={
-            "Dealer/Search Link": st.column_config.LinkColumn("Dealer/Search Link"),
+            "Dealer Listing": st.column_config.LinkColumn("Dealer Listing"),
+            "Find Listing": st.column_config.LinkColumn("Find Listing"),
             "Carfax": st.column_config.LinkColumn("Carfax"),
         },
     )
+
+    if "url" in filtered.columns and not filtered["url"].fillna("").astype(str).str.startswith(("http://", "https://")).any():
+        st.info(
+            "Auto.dev did not include direct dealer listing URLs in these rows. "
+            "Use Find Listing or the VIN to locate the dealer page."
+        )
 
     if not filtered.empty:
         st.header("Best Listing Details")
@@ -1104,7 +1201,9 @@ def show_results(df: pd.DataFrame) -> None:
             st.write(f"**Distance:** {distance_label(best.get('distance_miles'), include_units=True)}")
             st.write(f"**VIN:** `{best.get('vin', '')}`")
             if str(best.get("url", "")).startswith("http"):
-                st.link_button("Open Dealer/Search Link", best.get("url"))
+                st.link_button("Open Dealer Listing", best.get("url"))
+            if str(best.get("search_url", "")).startswith("http"):
+                st.link_button("Find Listing", best.get("search_url"))
             if str(best.get("carfax_url", "")).startswith("http"):
                 st.link_button("Open Carfax", best.get("carfax_url"))
 

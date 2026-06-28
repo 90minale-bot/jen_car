@@ -158,6 +158,18 @@ def extract_autodev_listings(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def extract_autodev_single_listing(payload: dict[str, Any]) -> dict[str, Any]:
+    """Auto.dev /listings/{vin} returns a wrapper whose data field is one listing."""
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(payload, dict) and any(key in payload for key in ["vehicle", "retailListing", "vin"]):
+        return payload
+
+    return {}
+
+
 def autodev_total(payload: dict[str, Any]) -> Any:
     data = payload.get("data")
     if isinstance(data, dict):
@@ -223,9 +235,95 @@ def autodev_search(
     return all_listings, last_response
 
 
-def estimated_api_calls(max_pages: int) -> int:
-    """Auto.dev pagination uses one API request per page."""
-    return max(1, int(max_pages))
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def autodev_get_listing_by_vin(vin: str, _api_key: str) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {_api_key}",
+        "Content-Type": "application/json",
+    }
+    response = requests.get(
+        f"{AUTODEV_ENDPOINT}/{vin}",
+        headers=headers,
+        timeout=30,
+    )
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {
+            "status_code": response.status_code,
+            "text": response.text[:1000],
+        }
+
+    if response.status_code != 200:
+        return {
+            "_detail_error": f"HTTP {response.status_code}",
+            "_detail_payload": payload,
+        }
+
+    detail = extract_autodev_single_listing(payload)
+    if detail:
+        detail["_detail_lookup"] = "found"
+        return detail
+
+    return {
+        "_detail_lookup": "empty",
+        "_detail_payload": payload,
+    }
+
+
+def merge_listing_records(base: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    merged = base.copy()
+
+    for key, value in detail.items():
+        if key.startswith("_"):
+            merged[key] = value
+            continue
+
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_listing_records(merged[key], value)
+        elif value not in (None, "", [], {}):
+            merged[key] = value
+
+    return merged
+
+
+def listing_vin(row: dict[str, Any]) -> str:
+    return first_non_empty(
+        row.get("vin"),
+        row.get("vehicle.vin"),
+        get_nested(row, ["vehicle", "vin"]),
+    )
+
+
+def hydrate_listings_with_vin_details(
+    listings: list[dict[str, Any]],
+    api_key: str,
+    max_detail_lookups: int,
+) -> tuple[list[dict[str, Any]], int]:
+    if max_detail_lookups <= 0:
+        return listings, 0
+
+    hydrated: list[dict[str, Any]] = []
+    lookup_count = 0
+    seen_vins: set[str] = set()
+
+    for listing in listings:
+        vin = listing_vin(listing)
+        if vin and vin not in seen_vins and lookup_count < max_detail_lookups:
+            detail = autodev_get_listing_by_vin(vin, _api_key=api_key)
+            hydrated.append(merge_listing_records(listing, detail))
+            seen_vins.add(vin)
+            lookup_count += 1
+        else:
+            hydrated.append(listing)
+
+    return hydrated, lookup_count
+
+
+def estimated_api_calls(max_pages: int, max_detail_lookups: int = 0) -> int:
+    """Auto.dev pagination uses one API request per page, plus optional VIN detail requests."""
+    return max(1, int(max_pages)) + max(0, int(max_detail_lookups))
 
 
 def build_report_markdown(df: pd.DataFrame) -> str:
@@ -1331,8 +1429,23 @@ def main() -> None:
         )
 
         require_awd = st.checkbox("AWD / 4WD only", value=False)
+        detail_lookup_enabled = st.checkbox(
+            "Try VIN detail lookup for dealer links",
+            value=True,
+            help="Calls /listings/{vin} for individual vehicles to see if Auto.dev exposes a direct dealer VDP URL there.",
+        )
+        max_detail_lookups = st.number_input(
+            "Max VIN detail lookups",
+            min_value=0,
+            max_value=100,
+            value=20,
+            step=5,
+            help="Each lookup is one extra Auto.dev API call. Use 0 to skip detail lookups.",
+            disabled=not detail_lookup_enabled,
+        )
 
-        call_estimate = estimated_api_calls(int(max_pages))
+        detail_lookup_count_limit = int(max_detail_lookups) if detail_lookup_enabled else 0
+        call_estimate = estimated_api_calls(int(max_pages), detail_lookup_count_limit)
         st.info(
             f"This search will use up to {call_estimate} Auto.dev API call"
             f"{'' if call_estimate == 1 else 's'}. Re-running the same search is cached for 1 hour."
@@ -1387,6 +1500,14 @@ def main() -> None:
 
                     raw_listing_count = len(listings)
                     filter_counts: list[tuple[str, int]] = [("Auto.dev raw listings", raw_listing_count)]
+                    if detail_lookup_count_limit:
+                        listings, detail_lookup_count = hydrate_listings_with_vin_details(
+                            listings,
+                            api_key=api_key,
+                            max_detail_lookups=detail_lookup_count_limit,
+                        )
+                        filter_counts.append(("VIN detail lookups", detail_lookup_count))
+
                     records = [extract_listing(x) for x in listings]
                     df = pd.DataFrame(records)
                     filter_counts.append(("Normalized rows", len(df)))
@@ -1475,6 +1596,12 @@ def main() -> None:
             st.write("Fuel types found:", sorted([str(x) for x in df["fuel_type"].dropna().unique() if str(x).strip()]))
         if "powertrain_type" in df.columns:
             st.write("Powertrain types found:", sorted([str(x) for x in df["powertrain_type"].dropna().unique() if str(x).strip()]))
+        if "url" in df.columns:
+            dealer_url_count = df["url"].fillna("").astype(str).str.startswith(("http://", "https://")).sum()
+            st.write("Direct dealer listing URLs found:", int(dealer_url_count))
+        if "dealer_url_candidates" in df.columns:
+            candidate_count = df["dealer_url_candidates"].fillna("").astype(str).str.strip().ne("").sum()
+            st.write("Rows with dealer URL candidates:", int(candidate_count))
         st.dataframe(df.head(5), width="stretch")
 
     show_results(df)

@@ -252,11 +252,12 @@ def build_report_markdown(df: pd.DataFrame) -> str:
                 f"- Fair market value: {money(row.get('market_value'))}",
                 f"- Market gap: {money(row.get('market_discount'))}",
                 f"- Mileage: {number(row.get('mileage'))}",
-                f"- Distance: {number(row.get('distance_miles'))} miles",
+                f"- Distance: {distance_label(row.get('distance_miles'), include_units=True)}",
                 f"- Dealer: {clean_text(row.get('dealer'))}",
                 f"- Location: {clean_text(row.get('city'))}, {clean_text(row.get('state'))}",
                 f"- VIN: {clean_text(row.get('vin'))}",
                 f"- Listing: {clean_text(row.get('url'))}",
+                f"- Carfax: {clean_text(row.get('carfax_url'))}",
                 "",
             ]
         )
@@ -296,6 +297,43 @@ def first_non_empty(*values: Any) -> str:
     return ""
 
 
+def distance_label(value: Any, include_units: bool = False) -> str:
+    """Show a useful label when Auto.dev radius-filtered rows omit per-listing distance."""
+    numeric_value = safe_num(value)
+    if numeric_value is None:
+        return "Within search radius"
+
+    text = number(numeric_value)
+    if not text:
+        return "Within search radius"
+    return f"{text} miles" if include_units else text
+
+
+def carfax_url_from_vin(vin: Any) -> str:
+    vin_text = clean_text(vin).upper()
+    if not vin_text:
+        return ""
+    return f"https://www.carfax.com/VehicleHistory/p/Report.cfx?partner=DVW_1&vin={vin_text}"
+
+
+def infer_fuel_type_from_text(*values: Any) -> str:
+    text = " ".join(clean_text(value).lower() for value in values if clean_text(value))
+    if not text:
+        return ""
+
+    if any(term in text for term in ["plug-in hybrid", "plug in hybrid", "phev"]):
+        return "Plug-In Hybrid"
+    if any(term in text for term in ["hybrid", "gas/electric", "gas electric", "gasoline/electric", "gasoline electric", "hev"]):
+        return "Hybrid"
+    if "diesel" in text:
+        return "Diesel"
+    if "electric" in text and not any(term in text for term in ["electric / unleaded", "electric/unleaded"]):
+        return "Electric"
+    if any(term in text for term in ["premium unleaded", "unleaded", "gasoline", "gas "]):
+        return "Gasoline"
+    return ""
+
+
 def extract_fuel_type(row: dict[str, Any], build: dict[str, Any]) -> str:
     """
     Auto.dev vehicle specs may include fuel_type or similar fuel fields.
@@ -306,11 +344,28 @@ def extract_fuel_type(row: dict[str, Any], build: dict[str, Any]) -> str:
     """
     return first_non_empty(
         build.get("fuel_type"),
+        build.get("fuelType"),
+        build.get("fuel"),
+        build.get("fuelCategory"),
+        build.get("fuelCategoryName"),
         row.get("fuel_type"),
+        row.get("fuelType"),
+        row.get("fuel"),
+        row.get("fuelCategory"),
+        row.get("fuelCategoryName"),
         get_nested(row, ["specs", "fuel_type"]),
+        get_nested(row, ["specs", "fuelType"]),
+        get_nested(row, ["specs", "fuel"]),
         get_nested(row, ["inventory", "fuel_type"]),
+        get_nested(row, ["inventory", "fuelType"]),
+        get_nested(row, ["inventory", "fuel"]),
+        get_nested(row, ["retailListing", "fuel_type"]),
+        get_nested(row, ["retailListing", "fuelType"]),
+        get_nested(row, ["retailListing", "fuel"]),
         build.get("powertrain_type"),
+        build.get("powertrainType"),
         row.get("powertrain_type"),
+        row.get("powertrainType"),
     )
 
 
@@ -384,6 +439,9 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
     vehicle = row.get("vehicle") if isinstance(row.get("vehicle"), dict) else {}
     retail = row.get("retailListing") if isinstance(row.get("retailListing"), dict) else {}
     history = row.get("history") if isinstance(row.get("history"), dict) else {}
+    dealer = row.get("dealer") if isinstance(row.get("dealer"), dict) else {}
+    location = row.get("location") if isinstance(row.get("location"), dict) else {}
+    retail_location = retail.get("location") if isinstance(retail.get("location"), dict) else {}
 
     price = safe_num(first_non_empty(retail.get("price"), row.get("price")))
 
@@ -440,11 +498,50 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         retail.get("distance"),
         retail.get("distanceMiles"),
         retail.get("distance_miles"),
+        retail.get("distanceToDealer"),
+        retail.get("dealerDistance"),
+        retail_location.get("distance"),
+        retail_location.get("distanceMiles"),
         row.get("distance"),
         row.get("distanceMiles"),
         row.get("distance_miles"),
+        row.get("distanceToDealer"),
+        row.get("dealerDistance"),
+        dealer.get("distance"),
+        dealer.get("distanceMiles"),
+        location.get("distance"),
+        location.get("distanceMiles"),
         row.get("dist"),
     ))
+
+    engine = first_non_empty(vehicle.get("engine"), vehicle.get("engineDescription"), row.get("engine"))
+    powertrain_type = first_non_empty(
+        vehicle.get("powertrainType"),
+        vehicle.get("powertrain_type"),
+        vehicle.get("powertrain"),
+        vehicle.get("engineType"),
+        row.get("powertrainType"),
+        row.get("powertrain_type"),
+        row.get("powertrain"),
+        row.get("engineType"),
+    )
+    fuel_type = extract_fuel_type(row, vehicle) or infer_fuel_type_from_text(
+        engine,
+        powertrain_type,
+        vehicle.get("trim"),
+        row.get("trim"),
+        row.get("title"),
+    )
+    vin = first_non_empty(row.get("vin"), vehicle.get("vin"))
+    carfax_url = first_non_empty(
+        history.get("carfaxUrl"),
+        history.get("carfax_url"),
+        row.get("carfaxUrl"),
+        row.get("carfax_url"),
+        retail.get("carfaxUrl"),
+        retail.get("carfax_url"),
+        carfax_url_from_vin(vin),
+    )
 
     item = {
         "title": title,
@@ -459,20 +556,22 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
         "deal_rating": deal_rating(market_discount),
         "mileage": mileage,
         "distance_miles": distance,
+        "distance_label": distance_label(distance),
         "drivetrain": first_non_empty(vehicle.get("drivetrain"), vehicle.get("driveTrain"), row.get("drivetrain")),
         "body_type": first_non_empty(vehicle.get("bodyType"), vehicle.get("body_type"), row.get("body_type")),
-        "fuel_type": extract_fuel_type(row, vehicle),
-        "powertrain_type": first_non_empty(vehicle.get("powertrainType"), vehicle.get("powertrain_type"), row.get("powertrain_type")),
-        "engine": first_non_empty(vehicle.get("engine"), row.get("engine")),
+        "fuel_type": fuel_type,
+        "powertrain_type": powertrain_type,
+        "engine": engine,
         "transmission": first_non_empty(vehicle.get("transmission"), row.get("transmission")),
         "exterior_color": first_non_empty(retail.get("exteriorColor"), row.get("exterior_color")),
         "interior_color": first_non_empty(retail.get("interiorColor"), row.get("interior_color")),
         "dealer": first_non_empty(retail.get("dealer"), row.get("dealer")),
         "city": city,
         "state": state,
-        "vin": first_non_empty(row.get("vin"), vehicle.get("vin")),
+        "vin": vin,
         "stock_no": first_non_empty(retail.get("stockNumber"), row.get("stock_no")),
         "url": listing_url,
+        "carfax_url": carfax_url,
         "dom": safe_num(first_non_empty(retail.get("daysOnMarket"), row.get("dom"))),
         "car_type": row.get("car_type"),
         "one_owner": first_non_empty(row.get("oneOwner"), history.get("oneOwner"), history.get("ownerCount") == 1),
@@ -539,7 +638,7 @@ def score_vehicle(item: dict[str, Any]) -> float:
       - Mileage:         20 pts
       - Distance:        15 pts
       - Year/age:        10 pts
-      - Drivetrain:      10 pts
+      - AWD / 4WD match: 10 pts
       - Price sanity:     5 pts
     """
     price = safe_num(item.get("price"))
@@ -630,7 +729,7 @@ def score_vehicle(item: dict[str, Any]) -> float:
         else:
             year_score = 1
 
-    # 5) Drivetrain score: 0-10
+    # 5) AWD / 4WD score: 0-10
     drivetrain_score = 5.0
     if "awd" in drivetrain or "4wd" in drivetrain:
         drivetrain_score = 10
@@ -678,6 +777,9 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         "dealer_city": "city",
         "dealer_state": "state",
         "distance": "distance_miles",
+        "distance_mi": "distance_miles",
+        "distance_miles": "distance_miles",
+        "distance_to_dealer": "distance_miles",
         "miles": "mileage",
         "odometer": "mileage",
         "asking_price": "price",
@@ -690,7 +792,12 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         "discount": "market_discount",
         "fuel": "fuel_type",
         "fueltype": "fuel_type",
+        "fuel_type": "fuel_type",
         "powertrain": "powertrain_type",
+        "powertrain_type": "powertrain_type",
+        "carfax": "carfax_url",
+        "carfax_report": "carfax_url",
+        "carfax_link": "carfax_url",
     }
 
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
@@ -719,10 +826,14 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         df["score"] = [score_vehicle(r) for r in records]
 
     if "title" not in df.columns:
-        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "drivetrain", "fuel_type", "powertrain_type"]:
+        for col in ["make", "model", "trim", "dealer", "city", "state", "vin", "url", "carfax_url", "drivetrain", "fuel_type", "powertrain_type"]:
             if col not in df.columns:
                 df[col] = ""
 
+    if "carfax_url" not in df.columns and "vin" in df.columns:
+        df["carfax_url"] = df["vin"].apply(carfax_url_from_vin)
+
+    if "title" not in df.columns:
         df["title"] = df.apply(
             lambda r: " ".join(
                 str(x)
@@ -782,7 +893,6 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
             ("make", "Make"),
             ("model", "Model"),
             ("trim", "Trim"),
-            ("drivetrain", "Drivetrain"),
             ("fuel_type", "Exact fuel type from Auto.dev"),
             ("deal_rating", "Deal rating"),
             ("state", "State"),
@@ -864,12 +974,12 @@ def show_results(df: pd.DataFrame) -> None:
         "distance_miles",
         "fuel_type",
         "powertrain_type",
-        "drivetrain",
         "dealer",
         "city",
         "state",
         "vin",
         "url",
+        "carfax_url",
     ]
 
     show_cols = [c for c in preferred_cols if c in filtered.columns]
@@ -892,12 +1002,12 @@ def show_results(df: pd.DataFrame) -> None:
             "distance_miles": "Distance",
             "fuel_type": "Fuel Type",
             "powertrain_type": "Powertrain Type",
-            "drivetrain": "Drivetrain",
             "dealer": "Dealer",
             "city": "City",
             "state": "State",
             "vin": "VIN",
             "url": "Listing",
+            "carfax_url": "Carfax",
         }
     )
 
@@ -905,9 +1015,11 @@ def show_results(df: pd.DataFrame) -> None:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(money)
 
-    for col in ["Mileage", "Distance"]:
-        if col in display_df.columns:
-            display_df[col] = display_df[col].apply(number)
+    if "Mileage" in display_df.columns:
+        display_df["Mileage"] = display_df["Mileage"].apply(number)
+
+    if "Distance" in display_df.columns:
+        display_df["Distance"] = display_df["Distance"].apply(distance_label)
 
     if "Year" in display_df.columns:
         display_df["Year"] = display_df["Year"].apply(lambda x: "" if pd.isna(x) else int(x))
@@ -918,6 +1030,7 @@ def show_results(df: pd.DataFrame) -> None:
         hide_index=True,
         column_config={
             "Listing": st.column_config.LinkColumn("Listing"),
+            "Carfax": st.column_config.LinkColumn("Carfax"),
         },
     )
 
@@ -932,9 +1045,12 @@ def show_results(df: pd.DataFrame) -> None:
             st.write(f"**Location:** {best.get('city', '')}, {best.get('state', '')}")
             st.write(f"**Fuel Type:** {best.get('fuel_type', '')}")
             st.write(f"**Powertrain Type:** {best.get('powertrain_type', '')}")
+            st.write(f"**Distance:** {distance_label(best.get('distance_miles'), include_units=True)}")
             st.write(f"**VIN:** `{best.get('vin', '')}`")
             if str(best.get("url", "")).startswith("http"):
                 st.link_button("Open Listing", best.get("url"))
+            if str(best.get("carfax_url", "")).startswith("http"):
+                st.link_button("Open Carfax", best.get("carfax_url"))
 
         with right:
             st.metric("Score", f"{best.get('score', '')}")
@@ -994,7 +1110,7 @@ def show_scoring_methodology() -> None:
                     "What helps the score": "Newer model years",
                 },
                 {
-                    "Factor": "Drivetrain",
+                    "Factor": "AWD / 4WD Match",
                     "Weight": "10%",
                     "What helps the score": "AWD / 4WD",
                 },

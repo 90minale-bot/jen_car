@@ -333,6 +333,13 @@ def is_provider_listing_url(value: Any) -> bool:
     return any(host == provider or host.endswith(f".{provider}") for provider in provider_hosts)
 
 
+def is_usable_listing_url(value: Any) -> bool:
+    url = clean_text(value)
+    if not url.startswith(("http://", "https://")):
+        return False
+    return not is_provider_listing_url(url)
+
+
 def search_url_for_listing(*values: Any) -> str:
     query = " ".join(clean_text(value) for value in values if clean_text(value))
     if not query:
@@ -568,7 +575,7 @@ def extract_listing(row: dict[str, Any]) -> dict[str, Any]:
     )
     dealer_name = first_non_empty(retail.get("dealer"), row.get("dealer"))
     buyer_search_url = search_url_for_listing(vin, title, dealer_name, city, state)
-    listing_url = buyer_search_url if is_provider_listing_url(raw_listing_url) else clean_text(raw_listing_url)
+    listing_url = clean_text(raw_listing_url) if is_usable_listing_url(raw_listing_url) else ""
     if not listing_url:
         listing_url = buyer_search_url
 
@@ -885,7 +892,7 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
 
         def usable_uploaded_url(row: pd.Series) -> str:
             existing_url = clean_text(row.get("url"))
-            if existing_url and not is_provider_listing_url(existing_url):
+            if is_usable_listing_url(existing_url):
                 return existing_url
             return search_url_for_listing(
                 row.get("vin"),

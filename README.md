@@ -35,6 +35,8 @@ Or in Streamlit Cloud secrets:
 AUTODEV_API_KEY = "your_key_here"
 ```
 
+The app also accepts `AUTO_DEV_API_KEY`, `AUTODEV_TOKEN`, or `AUTO_DEV_TOKEN` if you prefer those names.
+
 The app still works without an API key when you upload a CSV.
 
 ## Quota-Friendly Workflow

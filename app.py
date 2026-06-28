@@ -40,7 +40,7 @@ MAX_ALLOWED_PAGES = 5
 # API / config helpers
 # ------------------------------------------------------------
 def get_api_key() -> str:
-    for name in ("AUTODEV_API_KEY", "AUTO_DEV_API_KEY"):
+    for name in ("AUTODEV_API_KEY", "AUTO_DEV_API_KEY", "AUTODEV_TOKEN", "AUTO_DEV_TOKEN"):
         try:
             key = st.secrets.get(name, "")
             if key:
@@ -1042,7 +1042,8 @@ def main() -> None:
     if not api_key:
         st.warning(
             "Auto.dev API key is not configured. Add AUTODEV_API_KEY in Streamlit secrets "
-            "or as a local environment variable. You can still upload a CSV."
+            "or as a local environment variable. AUTO_DEV_API_KEY, AUTODEV_TOKEN, and AUTO_DEV_TOKEN also work. "
+            "You can still upload a CSV."
         )
 
     if "results_df" not in st.session_state:
@@ -1139,7 +1140,7 @@ def main() -> None:
     df = st.session_state["results_df"]
 
     if df.empty:
-        st.info("Enter search criteria in the sidebar and click **Search cars**, or upload a CSV.")
+        st.info("Enter search criteria in the sidebar and click **Build report**, or upload a CSV.")
         return
 
     with st.expander("Debug: data preview", expanded=False):
